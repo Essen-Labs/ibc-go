@@ -7,6 +7,7 @@ import (
 	errorsmod "cosmossdk.io/errors"
 	sdkmath "cosmossdk.io/math"
 
+	"github.com/cosmos/cosmos-sdk/baseapp"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 
 	"github.com/cosmos/ibc-go/v9/modules/apps/transfer/internal/events"
@@ -20,17 +21,21 @@ import (
 
 type Keeper struct {
 	transferkeeper.Keeper
-	channelKeeperV2 *channelkeeperv2.Keeper
+	channelKeeperV2  *channelkeeperv2.Keeper
+	msgServiceRouter *baseapp.MsgServiceRouter
 }
 
-func NewKeeper(transferKeeper transferkeeper.Keeper, channelKeeperV2 *channelkeeperv2.Keeper) *Keeper {
+func NewKeeper(transferKeeper transferkeeper.Keeper, channelKeeperV2 *channelkeeperv2.Keeper, msgServiceRouter *baseapp.MsgServiceRouter) *Keeper {
 	return &Keeper{
-		Keeper:          transferKeeper,
-		channelKeeperV2: channelKeeperV2,
+		Keeper:           transferKeeper,
+		channelKeeperV2:  channelKeeperV2,
+		msgServiceRouter: msgServiceRouter,
 	}
 }
 
 func (k *Keeper) OnSendPacket(ctx context.Context, sourceChannel string, payload channeltypesv2.Payload, data types.FungibleTokenPacketDataV2, sender sdk.AccAddress) error {
+	// TODO unwind logic for forwarding
+
 	for _, token := range data.Tokens {
 		coin, err := token.ToCoin()
 		if err != nil {
@@ -182,6 +187,48 @@ func (k *Keeper) OnRecvPacket(ctx context.Context, sourceChannel, destChannel st
 	// telemetry.ReportOnRecvPacket(packet, data.Tokens)
 
 	// The ibc_module.go module will return the proper ack.
+	return nil
+}
+
+// TODO move to a different file
+// forwardPacket forwards a fungible FungibleTokenPacketDataV2 to the next hop in the forwarding path.
+func (k Keeper) forwardPacket(ctx context.Context, data types.FungibleTokenPacketDataV2, payload channeltypesv2.Payload, timeoutTimestamp uint64, receivedCoins sdk.Coins) error {
+	newForwardingPacketData := types.NewForwardingPacketData(data.Forwarding.DestinationMemo)
+	if len(data.Forwarding.Hops) > 1 {
+		// remove the first hop since we are going to send to the first hop now and we want to propagate the rest of the hops to the receiver
+		newForwardingPacketData.Hops = data.Forwarding.Hops[1:]
+	}
+
+	memo := data.Memo
+	if len(newForwardingPacketData.Hops) > 0 {
+		memo = ""
+	}
+
+	// sending from module account (used as a temporary forward escrow) to the original receiver address.
+	sender := k.AuthKeeper.GetModuleAddress(types.ModuleName)
+
+	newPacketData := types.NewFungibleTokenPacketDataV2(data.Tokens, data.Sender, data.Receiver, memo, newForwardingPacketData)
+
+	pdBz, err := newPacketData.Marshal()
+	if err != nil {
+		return err
+	}
+	payload.Value = pdBz
+
+	msg := channeltypesv2.NewMsgSendPacket(
+		data.Forwarding.Hops[0].ChannelId,
+		timeoutTimestamp,
+		sender.String(),
+		payload,
+	)
+
+	handler := k.msgServiceRouter.Handler(&channeltypesv2.MsgSendPacket{})
+	resp, err := handler(sdk.UnwrapSDKContext(ctx), msg)
+	if err != nil {
+		return err
+	}
+	_ = resp
+	// k.setForwardedPacketSequence(ctx, data.Forwarding.Hops[0].PortId, data.Forwarding.Hops[0].ChannelId, resp.Sequence)
 	return nil
 }
 
