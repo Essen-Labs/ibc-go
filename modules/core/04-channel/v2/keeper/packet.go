@@ -210,7 +210,7 @@ func (k Keeper) WriteAcknowledgement(
 	// TODO: decide how relayers will reconstruct the packet as it is not being passed.
 	// EmitWriteAcknowledgementEvents(ctx, packet, ack)
 
-	k.DeletePacket(ctx, "what here", destinationChannel, sequence)
+	k.DeletePacket(ctx, destinationChannel, sequence)
 
 	return nil
 }
